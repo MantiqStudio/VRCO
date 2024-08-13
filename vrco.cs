@@ -1,13 +1,14 @@
-﻿//"Virtual reality command operator"
-//vrco 1.0 from MantiqStudio
 
+/**************************************************************************/
+/*  vrco.cs                                                               */
+/*                         This code is part of:                          */
+/*                             VRCO: Project                              */
+/*                  "Virtual reality command operator"                    */
+/*                      vrco 1.0 from MantiqStudio                        */
+/**************************************************************************/
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
+using System.Reflection;
+using System.Reflection.Emit;
 
 namespace vrco
 {
@@ -47,18 +48,21 @@ namespace vrco
             stopping = false;
             while (Commands.Count > 0 && !stopping)
             {
-                string code = Commands[0];
-                if (code != "") Single(code);
-                Commands.RemoveAt(0);
+                Single(Commands[0]);
+                if (Commands.Count != 0) Commands.RemoveAt(0);
             }
         }
 
-        public List<string> Commands = null;
-        public void Multi(string codes)
+        public List<string> Commands = new List<string>();
+        public List<string> WaitCommands = new List<string>();
+        public async void Multi(string codes)
         {
+            if (Commands.Count > 0) WaitCommands = Commands;
             Commands = codes.Split('\n').ToList();
             Start();
+            Commands = WaitCommands;
         }
+        public void FixedMulti(string codes) => Multi(codes.Replace("\n\n", "\n"));
     }
 
     public class Type : Object
@@ -114,7 +118,7 @@ namespace vrco
     public class oAction : Object
     {
         public string[] types;
-        public virtual void Invoke() { }
+        public virtual async void Invoke() { }
     }
 
     public class OebCodeAction : oAction
@@ -125,6 +129,7 @@ namespace vrco
         public override void Invoke()
         {
             engine.Multi(code);
+            actvar.Reimport(engine);
         }
     }
 
@@ -141,12 +146,55 @@ namespace vrco
         }
     }
 
+    public class KernelAction : oAction
+    {
+        public Engine engine;
+        public string library;
+        public string path = "IN";
+        public string key = "IN";
+        public override void Invoke()
+        {
+            engine.Multi($"LOAD>{library}:{path}-{key}");
+        }
+    }
+
+
+    public class actvar
+    {
+        public static void Install(Engine engine)
+        {
+            Class @class = new Class(":ACTVAR", engine.Types[":INADDON"]);
+            engine.StaticClasses.Add(":ACTVAR", @class);
+        }
+        public static void Reimport(Engine engine)
+        {
+            engine.StaticClasses[":ACTVAR"].Public.Clear();
+        }
+    }
+    public class Kernel
+    {
+        public static void LoadPackage(string assemblyText)
+        {
+            System.Type[] Types = Assembly.Load(assemblyText).GetTypes();
+            foreach (System.Type type in Types) LoadType(type);
+        }
+        public static void LoadType(System.Type type)
+        {
+            Type t = new Type();
+            
+        }
+    }
+
     namespace Core
     {
         public class CoreObjects
         {
             public static void Install(Engine engine)
             {
+                engine.Add("V:NULL", GNULL);
+                engine.Add("T:AFTER", AfterAction);
+                engine.Add("T:BREAK", BreakAction);
+
                 engine.Add("V:[8]I", Integer8Action);
                 engine.Add("V:[16]I", Integer16Action);
                 engine.Add("V:[32]I", Integer32Action);
@@ -166,11 +214,15 @@ namespace vrco
 
                 engine.Add("S:[S]TYPE", StartTypeAction);
                 engine.Add("S:[E]TYPE", EndTypeAction);
+
                 engine.Add("S:[U]OBJECT", uObjectAction);
                 engine.Add("S:[R]OBJECT", rObjectAction);
+                engine.Add("S:[Q]OBJECT", scuObjectAction);
+
                 engine.Add("S:[L]GET", uGetAction);
                 engine.Add("S:[P]GET", upGetAction);
                 engine.Add("S:[O]GET", StaticGetAction);
+
                 engine.Add("S:NEW", NewAction);
                 engine.Add("A:PRINT", PrintAction);
                 engine.Add("V:STRING", StringAction);
@@ -178,10 +230,40 @@ namespace vrco
                 engine.Add("V:ACTION", ActionAction);
                 engine.Add("T:INVOKE", InvokeAction);
                 engine.Add("T:IF", IfAction);
-                
+                engine.Add("V:[I]BOOL", IBoolAction);
+
+                //INADDON installer
+                engine.Types.Add(":INADDON", new Type { key = ":INADDON", value = "::ID0"});
             }
             //Objects Action
 
+            public static Object NULL = new Object("-null");
+            public static void GNULL(string mode, Engine engine)
+            {
+                engine.Drop(NULL);
+            }
+
+            public static List<string> CommandsAfter;
+            public static async void AfterAction(string mode, Engine engine)
+            {
+                engine.Stop();
+                CommandsAfter = engine.Commands.ToList();
+                engine.Commands.Clear();
+                ((oAction)engine.Target()).Invoke();
+            }
+            public static void StartAfter(Engine engine)
+            {
+                engine.Commands = CommandsAfter;
+                engine.Start();
+            }
+
+            //small task
+            public static void IBoolAction(string mode, Engine engine)
+            {
+                bool boolen = (bool)engine.Target().value;
+                if (boolen) engine.Drop(False);
+                else engine.Drop(True);
+            }
 
             //numbers
             //Integer
@@ -203,7 +285,7 @@ namespace vrco
 
 
             private static Object True = new Object { value = true };
-            private static Object False = new Object { value = false};
+            private static Object False = new Object { value = false };
             public static void IfAction(string mode, Engine engine)
             {
                 bool boolen = (bool)engine.Target().value;
@@ -223,6 +305,18 @@ namespace vrco
             public static void rObjectAction(string mode, Engine engine)
             {
                 engine.TargetType.Private.Add(mode, engine.Target());
+            }
+
+            public static void scuObjectAction(string mode, Engine engine)
+            {
+                string CLASS = mode.Split('|')[0];
+                string KEY = mode.Split('|')[1];
+                engine.StaticClasses[CLASS].Public.Add(KEY, engine.Target());
+            }
+
+            public static void BreakAction(string mode, Engine engine)
+            {
+                engine.Stop();
             }
 
             public static void StartTypeAction(string mode, Engine engine)
@@ -245,12 +339,7 @@ namespace vrco
 
             public static void ActionAction(string mode, Engine engine)
             {
-                engine.Drop(new OebCodeAction() { engine = engine , code = (engine.Target()).ToString(), types = mode.Split("|")});
-            }
-
-            public static void uGetAction(string mode, Engine engine)
-            {
-                engine.Drop(engine.TargetClass.ppget(mode));
+                engine.Drop(new OebCodeAction() { engine = engine, code = (engine.Target()).ToString(), types = mode.Split("|") });
             }
 
             public static void upGetAction(string mode, Engine engine)
@@ -265,6 +354,11 @@ namespace vrco
                 Class Target = engine.TargetClass;
                 foreach (string path in Path) Target = (Class)Target.ppget(path);
                 engine.Drop(Target.ppget(Key));
+            }
+
+            public static void uGetAction(string mode, Engine engine)
+            {
+                engine.Drop(engine.TargetClass.ppget(mode));
             }
 
             public static void StaticGetAction(string mode, Engine engine)
@@ -288,7 +382,7 @@ namespace vrco
 
             public static void InvokeAction(string mode, Engine engine)
             {
-                oAction act = engine.Target() as oAction;
+                oAction act = (oAction)engine.Target();
                 act.Invoke();
             }
             public static void StringAction(string mode, Engine engine)
@@ -309,65 +403,30 @@ namespace vrco
                 engine.Drop(new Object(mode));
             }
         }
-    }
-
-    namespace Packages
-    {
-        namespace oMath
+        public class KernelObjects
         {
-            public class MathOCP
+            public static void Install(Engine engine)
             {
-                public static void Install(Engine engine)
-                {
-                    Class @class = new Class();
-                    engine.StaticClasses.Add("Math", @class);
-
-                    void Plus() => engine.Drop(new Object { value = (float)engine.Target().value + (float)engine.Target().value });
-                    @class.Public.Add("Plus", new SystemAction(Plus));
-
-                    void Minus() => engine.Drop(new Object { value = (float)engine.Target().value - (float)engine.Target().value });
-                    @class.Public.Add("Minus", new SystemAction(Plus));
-
-                    void Multiply() => engine.Drop(new Object { value = (float)engine.Target().value * (float)engine.Target().value });
-                    @class.Public.Add("Multiply", new SystemAction(Plus));
-
-                    void Divide() => engine.Drop(new Object { value = (float)engine.Target().value / (float)engine.Target().value });
-                    @class.Public.Add("Divide", new SystemAction(Plus));
-
-                    void Clamp()
-                    {
-                        float value = (float)engine.Target().value;
-                        float max = (float)engine.Target().value;
-                        float min = (float)engine.Target().value;
-                        if (value > max) value = max;
-                        if (value < min) value = min;
-                        engine.Drop(new Object { value = value });
-                    }
-                    @class.Public.Add("Clamp", new SystemAction(Clamp));
-
-                    void Lerp()
-                    {
-                        float from = (float)engine.Target().value;
-                        float to = (float)engine.Target().value;
-                        float speed = (float)engine.Target().value;
-
-                        engine.Drop(new Object { value = from * (1 - speed) + to * speed });
-                    }
-                    @class.Public.Add("Lerp", new SystemAction(Lerp));
-                }
+                engine.Add("LOAD", Load);
             }
-        }
-        namespace oConsole
-        {
-            public class ConsoleOCP
+
+            public static void Load(string mode, Engine engine)
             {
-                public static void Install(Engine engine)
+                string[] modes = mode.Split(':');
+
+                Assembly library = Assembly.LoadFrom(modes[0].Replace("[@S]", Environment.SystemDirectory));
+                MethodInfo method = library.GetType(modes[1]).GetMethod(modes[2]);
+
+                List<object> parameters = new List<object>();
+                int parametersNumber = method.GetParameters().Length;
+                while(parametersNumber > 0)
                 {
-                    Class ConsoleClass = new Class();
-                    engine.StaticClasses.Add("Console", ConsoleClass);
-                    void PrintAction() { Console.WriteLine(engine.Target()); }
-                    ConsoleClass.Public.Add("Print", new SystemAction(PrintAction));
+                    parametersNumber--;
+                    parameters.Add(engine.Target().value);
                 }
+
+                object result = method.Invoke(null, parameters.ToArray());
+                engine.Drop(new Object(result));
             }
         }
     }
